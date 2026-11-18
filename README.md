@@ -90,6 +90,111 @@ docker compose -f deployments/docker-compose.yml up --build
 
 ## Skenario Demonstrasi Live (Quality Gate Failure)
 
-1. Pada kondisi awal, `npm run test:coverage` di `backend/` memiliki cakupan global sekitar **85%** dan lulus Quality Gate (`>= 70%`).
-2. Tambahkan satu modul baru di `backend/src/services/` (sekitar ~45 baris kode, misalnya modul export/invoice helper) **tanpa** menambahkan unit test.
-3. Jalankan kembali `npm run test:coverage` atau push ke branch PR — Vitest V8 Coverage akan mencatat penurunan cakupan global ke bawah **70%** sehingga pipeline CI gagal otomatis pada tahap Quality Gate.
+1. Pada kondisi awal, `npm run test:coverage` di `backend/` memiliki cakupan global **87.37%** (`Lines` & `Statements`) dan lulus Quality Gate (`>= 70%`).
+2. Untuk memicu kegagalan Quality Gate, buat berkas baru **`backend/src/services/promo.service.js`** (48 baris) **tanpa** menambahkan unit test:
+
+```javascript
+export const PROMO_CODES = {
+  EARLYBIRD10: { discountRate: 0.1, minSeats: 1, active: true },
+  CAMPUS20: { discountRate: 0.2, minSeats: 2, active: true },
+  EXPIRED50: { discountRate: 0.5, minSeats: 1, active: false }
+};
+
+export function validatePromoCode(code, seatQty) {
+  if (!code || typeof code !== 'string') {
+    throw new Error('Promo code must be a non-empty string');
+  }
+  const normalized = code.trim().toUpperCase();
+  const promo = PROMO_CODES[normalized];
+  if (!promo) {
+    throw new Error('Promo code not found');
+  }
+  if (!promo.active) {
+    throw new Error('Promo code is no longer active');
+  }
+  if (!Number.isInteger(seatQty) || seatQty < promo.minSeats) {
+    throw new Error('Seat quantity does not meet promo requirement');
+  }
+  return { code: normalized, ...promo };
+}
+
+export function applyPromoDiscount(subtotal, code, seatQty) {
+  if (typeof subtotal !== 'number' || subtotal <= 0) {
+    throw new Error('Subtotal must be a positive number');
+  }
+  const promo = validatePromoCode(code, seatQty);
+  const discountAmount = Math.round(subtotal * promo.discountRate);
+  const finalPrice = Math.max(0, subtotal - discountAmount);
+  return {
+    promoCode: promo.code,
+    discountRate: promo.discountRate,
+    discountAmount,
+    finalPrice
+  };
+}
+
+export function listActivePromos() {
+  return Object.entries(PROMO_CODES)
+    .filter(([, details]) => details.active)
+    .map(([code, details]) => ({
+      code,
+      discountPercent: Math.round(details.discountRate * 100),
+      minSeats: details.minSeats
+    }));
+}
+```
+
+3. Jalankan kembali `npm run test:coverage` di `backend/` atau push ke branch PR — Vitest V8 Coverage akan mencatat penurunan cakupan global menjadi **60.81%** (`Lines` & `Statements`) sehingga pipeline CI gagal otomatis pada tahap Quality Gate:
+
+```text
+ERROR: Coverage for lines (60.81%) does not meet global threshold (70%)
+ERROR: Coverage for statements (60.81%) does not meet global threshold (70%)
+```
+
+4. Untuk mendemonstrasikan perbaikan pada PR yang sama, tambahkan unit test **`backend/tests/unit/promo.service.test.js`** lalu jalankan kembali `npm run test:coverage` agar pipeline kembali lulus Quality Gate:
+
+```javascript
+import { describe, it, expect } from 'vitest';
+import {
+  validatePromoCode,
+  applyPromoDiscount,
+  listActivePromos
+} from '../../src/services/promo.service.js';
+
+describe('promo.service unit tests', () => {
+  it('validates active promo codes and rejects invalid/expired ones', () => {
+    expect(validatePromoCode('campus20', 2)).toEqual({
+      code: 'CAMPUS20',
+      discountRate: 0.2,
+      minSeats: 2,
+      active: true
+    });
+    expect(() => validatePromoCode('', 1)).toThrow('Promo code must be a non-empty string');
+    expect(() => validatePromoCode('UNKNOWN', 1)).toThrow('Promo code not found');
+    expect(() => validatePromoCode('EXPIRED50', 2)).toThrow('Promo code is no longer active');
+    expect(() => validatePromoCode('CAMPUS20', 1)).toThrow(
+      'Seat quantity does not meet promo requirement'
+    );
+  });
+
+  it('applies promo discount accurately', () => {
+    const result = applyPromoDiscount(700000, 'CAMPUS20', 2);
+    expect(result).toEqual({
+      promoCode: 'CAMPUS20',
+      discountRate: 0.2,
+      discountAmount: 140000,
+      finalPrice: 560000
+    });
+    expect(() => applyPromoDiscount(0, 'CAMPUS20', 2)).toThrow(
+      'Subtotal must be a positive number'
+    );
+  });
+
+  it('lists only active promos', () => {
+    expect(listActivePromos()).toEqual([
+      { code: 'EARLYBIRD10', discountPercent: 10, minSeats: 1 },
+      { code: 'CAMPUS20', discountPercent: 20, minSeats: 2 }
+    ]);
+  });
+});
+```
